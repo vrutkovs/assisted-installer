@@ -39,6 +39,8 @@ const (
 
 var generalWaitTimeout = 30 * time.Second
 var generalWaitInterval = 5 * time.Second
+var okdPivotWaitTimeout = 30 * time.Minute
+var okdPivotWaitInterval = 30 * time.Second
 
 // Installer will run the install operations on the node
 type Installer interface {
@@ -532,6 +534,35 @@ func (i *installer) waitForBootkube(ctx context.Context) {
 	}
 }
 
+func (i *installer) waitForOKDPivot(ctx context.Context) error {
+	i.log.Infof("Waiting for OKD pivot to complete")
+
+	// Skip if no release-image-pivot service present
+	_, err := i.ops.ExecPrivilegeCommand(nil, "systemctl", "is-enabled", "release-image-pivot")
+	if err != nil {
+		i.log.Info("release-image-pivot service not found")
+		return nil
+	}
+	i.log.Info("OKD detected, waiting for pivot to complete")
+
+	var lastError error
+	timeout := time.NewTicker(okdPivotWaitTimeout)
+	ticker := time.NewTicker(okdPivotWaitInterval)
+	for {
+		select {
+		case <-timeout.C:
+			i.log.Info("Timeout, exiting")
+			return lastError
+		case <-ticker.C:
+			_, lastError = i.ops.ExecPrivilegeCommand(nil, "stat", "/opt/openshift/.pivot-done")
+			i.log.Infof(".pivot-done check: %q", lastError)
+			if lastError == nil {
+				return nil
+			}
+		}
+	}
+}
+
 func (i *installer) waitForController(kc k8s_client.K8SClient) error {
 	i.log.Infof("Waiting for controller to be ready")
 	i.UpdateHostInstallProgress(models.HostStageWaitingForController, "waiting for controller pod ready event")
@@ -776,6 +807,7 @@ func (i *installer) createSingleNodeMasterIgnition() (string, error) {
 		i.log.Errorf("Bootstrap failed %s", err)
 		return "", err
 	}
+	i.waitForOKDPivot(context.Background())
 	i.waitForBootkube(context.Background())
 	_, err := i.ops.ExecPrivilegeCommand(utils.NewLogWriter(i.log), "stat", singleNodeMasterIgnitionPath)
 	if err != nil {
